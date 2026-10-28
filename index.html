@@ -722,10 +722,12 @@ function makeParents(s) {
     return ch(jobs);
   };
   const nm = () => (s.family === '스타족' && chance(0.5)) ? ch(W.starPrefix[s.cid] || W.starPrefix.starland) + '스타' : ch(pool);
-  if (s.family === '까까족') { s.parents.push({ rel: '부모 반죽', name: nm(), job: jobsOf(), at: ri(25, 60), alive: true }); return; }
+  if (s.family === '까까족') { let pn = nm(); for (let i = 0; i < 20 && pn === s.name; i++) pn = nm(); s.parents.push({ rel: '부모 반죽', name: pn, job: jobsOf(), at: ri(25, 60), alive: true }); return; }
   const noName = s.status === '노비' || s.status === '천민';
   s.parents.push({ rel: '아버지', name: noName ? '(이름 없음)' : nm(), job: jobsOf(), at: ri(22, 40), alive: true });
-  s.parents.push({ rel: '어머니', name: noName ? '(이름 없음)' : nm(), job: jobsOf(), at: ri(20, 38), alive: true });
+  if (!noName && s.parents[0].name === s.name) { for (let i = 0; i < 20 && s.parents[0].name === s.name; i++) s.parents[0].name = nm(); }
+  let mom = nm(); for (let i = 0; i < 20 && (mom === s.parents[0].name || mom === s.name); i++) mom = nm();
+  s.parents.push({ rel: '어머니', name: noName ? '(이름 없음)' : mom, job: jobsOf(), at: ri(20, 38), alive: true });
 }
 function parentsText(s) {
   if (s.family === '에덴') return null;
@@ -745,7 +747,7 @@ function birthLog(s) {
   const yr = s.year;
   let first;
   if (s.family === '에덴') first = `${yr}년, ${s.region} 근처의 에덴동산에서 열매 하나가 영글어 떨어졌다. 그 열매가 ${jo(dispName(s), '였다')}. 눈을 뜨자마자 말을 할 수 있었다.`;
-  else if (s.family === '갯별인') { const n = ri(3, 8); for (let i = 1; i < n; i++) s.siblings.push({ name: ch(W.raceNames['갯별인']), y: yr, twin: true }); first = `${yr}년, {country} {region}에서 알 ${n}개 가운데 하나가 깨어났다. ${jo(dispName(s), '였다')}.`; }
+  else if (s.family === '갯별인') { const n = ri(3, 8); for (let i = 1; i < n; i++) s.siblings.push({ name: uniqueFrom(s, W.raceNames['갯별인']), y: yr, twin: true }); first = `${yr}년, {country} {region}에서 알 ${n}개 가운데 하나가 깨어났다. ${jo(dispName(s), '였다')}.`; }
   else if (s.family === '스타족' || s.family === '왜성족') first = `${yr}년, {country} {region}에서 별구름에 감싸인 아기별이 태어났다.`;
   else first = `${yr}년, {country} {region}에서 아이가 태어났다.`;
   log(s, first, 'birth');
@@ -1235,10 +1237,20 @@ const DECISIONS = [
   } },
 ];
 // ===== 생애 단계 (학교·진로·은퇴) =====
+// 이미 주변에 있는 사람과 이름이 겹치지 않게 뽑는다
+function usedNames(s) {
+  const u = new Set([s.name, s.partner, s.exPartner, s.cand]);
+  for (const g of [s.parents, s.siblings, s.friends, s.kids]) for (const p of g || []) u.add(p.name);
+  return u;
+}
+function uniqueFrom(s, arr) { const used = usedNames(s); const c = arr.filter(x => !used.has(x)); if (c.length) return ch(c); let n = ch(arr), k = 2; while (used.has(n + ' ' + k)) k++; return n + ' ' + k; }
 function genPartner(s) {
-  const pool = W.names[s.cid] || W.names.starland;
-  if (s.family === '스타족' && chance(0.4)) return ch(W.starPrefix[s.cid] || W.starPrefix.starland) + '스타';
-  return ch(pool);
+  const pool = W.names[s.cid] || W.names.starland, used = usedNames(s);
+  const one = () => (s.family === '스타족' && chance(0.4)) ? ch(W.starPrefix[s.cid] || W.starPrefix.starland) + '스타' : ch(pool);
+  let n = one();
+  for (let i = 0; i < 30 && used.has(n); i++) n = one();
+  if (used.has(n)) { let k = 2; while (used.has(n + ' ' + k)) k++; n = n + ' ' + k; }
+  return n;
 }
 function moveTo(s, cid, region) {
   s.cid = cid; s.region = region; s.flags.add('immigrant'); markG(s, '이');
@@ -1502,13 +1514,13 @@ const EVENTS = [
       { t: '혼자 지내기로 한다', aw: 0.7, r: s => { if (chance(0.5)) s.flags.add('single_choice'); fx(s, { j: -1 }); return '혼자 지내기로 했다. 아쉬움은 오래가지 않았다.'; } }], { turn: 1 });
   } },
   { id: 'musul_love', a: [17, 40], c: ['musul'], f: ['파이터성인'], need: ['warriorLife'], not: ['married'], w: 1.6, run: s => {
-    s.cand = ch(W.names.musul);
+    s.cand = uniqueFrom(s, W.names.musul);
     ask(s, `다른 부족의 ${jo(s.cand, '과')} 사랑에 빠졌다. 부족 간 혼인은 금지였고, 발각되면 처형될 수도 있었다.`, [
       { t: '몰래 만난다', aw: 0.7, r: s => { if (chance(0.18)) { die(s, '부족의 금기를 어긴 죄로 처형되었다.', 'violent'); return null; } s.partner = s.cand; s.partnerSince = s.year; s.flags.add('married'); markG(s, '결'); fx(s, { j: 12 }); return `들키지 않았다. 몇 년 뒤 둘은 장벽도시로 거처를 옮겨 함께 살았다.`; } },
       { t: '마음을 접는다', aw: 1.3, r: s => { fx(s, { j: -8 }); s.partner = genPartner(s); s.partnerSince = s.year; s.flags.add('married'); markG(s, '결'); return `마음을 접었다. 이듬해 같은 부족의 ${jo(s.partner, '과')} 혼인했다.`; } }], { turn: 1 });
     src(s, '무술별');
   } },
-  { id: 'child', a: [22, 44], rep: true, need: ['married'], w: s => s.children.length >= 4 ? 0 : 1.5 - s.children.length * 0.3, when: s => s.family !== '에덴', run: s => {
+  { id: 'child', a: [22, 44], rep: true, need: ['married'], w: s => s.children.length >= 4 ? 0 : 1.5 - s.children.length * 0.3, when: s => s.family !== '에덴' && s.year - (s.partnerSince || 0) >= 1, run: s => {
     const n = genPartner(s);
     addKid(s, n);
     let t;
@@ -2231,7 +2243,7 @@ function fixJosa(t) {
     renderAll();
     setPlaying(true);
   });
-  $('speed').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; speed = +b.dataset.s; fastToDecision = false; store('bj_speed2', String(speed)); markSpeed(); if (playing) { flushReveal(); clearTimeout(timer); startYearClock(); timer = setTimeout(loop, delay()); } });
+  $('speed').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; speed = +b.dataset.s; fastToDecision = false; store('bj_speed2', String(speed)); markSpeed(); if (playing && S && S.alive && !S.pending) { pauseClock(); runClock(); } });
   function markSpeed() { [...$('speed').children].forEach(x => x.setAttribute('aria-pressed', +x.dataset.s === speed && !fastToDecision)); $('nextBtn').setAttribute('aria-pressed', fastToDecision); }
   markSpeed();
   function markAuto() { $('autoBtn').setAttribute('aria-pressed', auto); $('autoStart').checked = auto; }
@@ -2251,38 +2263,54 @@ function fixJosa(t) {
   function setYearFactor(entries) { const n = entries.filter(e => !['news', 'quiet', 'pick'].includes(e.kind)).length; yearFactor = n === 0 ? 0.4 : n === 1 ? 0.7 : 1; }
   function setPlaying(p) {
     playing = p; $('playBtn').textContent = p ? '일시정지' : '계속';
+    if (!p) { pauseClock(); return; }
     clearTimeout(timer);
-    if (!p) { flushReveal(); stopYearClock(); }
-    if (p && S && S.alive && !S.pending) { startYearClock(); timer = setTimeout(loop, delay()); }
+    if (S && S.alive && !S.pending) runClock();
   }
   // 한 해의 기록을 한꺼번에 띄우지 않고 그해에 걸쳐 차례로 보여준다
   let revealTimers = [], revealQueue = [];
-  function flushReveal() { revealTimers.forEach(clearTimeout); revealTimers = []; const q = revealQueue; revealQueue = []; q.forEach(appendEntry); }
+  // 한 해의 진행은 0~1 비율로 기억한다. 멈추거나 속도를 바꿔도 그 자리에서 이어 간다
+  let yFrac = 0, yAnchor = 0, yDur = 1, clockOn = false, monthTimer = null;
+  function progress() { return clockOn ? Math.min(1, yFrac + (performance.now() - yAnchor) / yDur) : yFrac; }
+  function flushReveal() { revealTimers.forEach(clearTimeout); revealTimers = []; const q = revealQueue; revealQueue = []; q.forEach(x => appendEntry(x.e)); }
   function reveal(entries) {
     flushReveal();
     const d = delay();
     if (d < 1500 || S.pending || !S.alive || entries.length <= 1) { entries.forEach(appendEntry); return; }
     const first = entries.filter(e => e.kind === 'news'), rest = entries.filter(e => e.kind !== 'news');
     first.forEach(appendEntry);
-    revealQueue = rest.slice();
-    const span = d * 0.75, gap = span / (rest.length + 1);
-    rest.forEach((e, i) => revealTimers.push(setTimeout(() => { const k = revealQueue.indexOf(e); if (k >= 0) { revealQueue.splice(k, 1); appendEntry(e); } }, gap * (i + 1))));
+    revealQueue = rest.map((e, i) => ({ e, f: 0.75 * (i + 1) / (rest.length + 1) }));
   }
-  // 상단: 그해의 달과 진행 막대
-  let yearStart = 0, monthTimer = null;
-  function startYearClock() {
-    yearStart = performance.now();
-    const bar = $('tbProg'); bar.style.transition = 'none'; bar.style.width = '0%'; void bar.offsetWidth;
-    const d = delay(); bar.style.transition = d >= 1000 ? `width ${d}ms linear` : 'none'; bar.style.width = '100%';
-    clearInterval(monthTimer);
-    if (d >= 3000) monthTimer = setInterval(showMonth, 400);
+  function scheduleReveal() {
+    revealTimers.forEach(clearTimeout); revealTimers = [];
+    revealQueue.slice().forEach(x => {
+      const wait = (x.f - yFrac) * yDur;
+      const show = () => { const k = revealQueue.indexOf(x); if (k >= 0) { revealQueue.splice(k, 1); appendEntry(x.e); } };
+      if (wait <= 0) show(); else revealTimers.push(setTimeout(show, wait));
+    });
+  }
+  function startYearClock() { yFrac = 0; runClock(); }
+  function runClock() {
+    clearTimeout(timer); clearInterval(monthTimer);
+    yDur = Math.max(1, delay()); yAnchor = performance.now(); clockOn = true;
+    const left = (1 - yFrac) * yDur;
+    const bar = $('tbProg'); bar.style.transition = 'none'; bar.style.width = (yFrac * 100) + '%'; void bar.offsetWidth;
+    bar.style.transition = yDur >= 1000 ? `width ${left}ms linear` : 'none'; bar.style.width = '100%';
+    if (yDur >= 3000) monthTimer = setInterval(showMonth, 400);
+    showMonth(); scheduleReveal();
+    timer = setTimeout(loop, left);
+  }
+  function pauseClock() {
+    yFrac = progress(); clockOn = false;
+    clearTimeout(timer); clearInterval(monthTimer); revealTimers.forEach(clearTimeout); revealTimers = [];
+    const bar = $('tbProg'); bar.style.transition = 'none'; bar.style.width = (yFrac * 100) + '%';
     showMonth();
   }
-  function stopYearClock() { clearInterval(monthTimer); const bar = $('tbProg'); const w = getComputedStyle(bar).width; bar.style.transition = 'none'; bar.style.width = w; }
+  function stopYearClock() { pauseClock(); }
   function showMonth() {
     if (!S) return;
-    const d = delay(), m = d >= 3000 ? Math.min(12, 1 + Math.floor((performance.now() - yearStart) / d * 12)) : null;
-    $('tbSub').textContent = `${S.year}년${m && playing ? ' ' + m + '월' : ''} · ${cname(S)} · ${S.region}`;
+    const m = yDur >= 3000 ? Math.min(12, 1 + Math.floor(progress() * 12)) : null;
+    $('tbSub').textContent = `${S.year}년${m ? ' ' + m + '월' : ''} · ${cname(S)} · ${S.region}`;
   }
   function loop() {
     if (!S || !S.pending) hideChoice();
@@ -2296,7 +2324,6 @@ function fixJosa(t) {
     if (S.pending) { stopYearClock(); return onChoice(); }
     if (!S.alive) { stopYearClock(); return finish(); }
     startYearClock();
-    timer = setTimeout(loop, delay());
   }
   function onChoice() {
     const p = S.pending;
@@ -2322,7 +2349,7 @@ function fixJosa(t) {
     renderAll();
     if (S.pending) return onChoice();
     if (!S.alive) return finish();
-    if (playing) { startYearClock(); timer = setTimeout(loop, delay()); }
+    if (playing) startYearClock();
   }
   function skipToEnd() {
     clearTimeout(timer); flushReveal(); stopYearClock(); hideChoice(); fastToDecision = false; markSpeed();
