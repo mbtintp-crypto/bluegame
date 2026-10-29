@@ -205,6 +205,8 @@ body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-a
 .cm-note[hidden] { display: none !important; }
 .cm-opts { display: grid; gap: 8px; }
 .cm-opts button { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 10px; text-align: left; border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 6px; padding: 13px 16px; font-size: 15.5px; font-weight: 600; line-height: 1.45; }
+.cm-opts button:disabled { opacity: .5; cursor: not-allowed; box-shadow: none; }
+.cm-opts .why { display: block; font-weight: 400; font-size: 12.5px; color: var(--stamp); }
 .cm-opts button .n { font-family: var(--mono); font-weight: 400; color: var(--muted); font-size: 13px; }
 .cm-opts button:hover, .cm-opts button:focus-visible { border-color: var(--ink); background: var(--card); outline: none; box-shadow: 0 0 0 1px var(--ink) inset; }
 .cm-auto { justify-self: center; border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 6px; padding: 8px 16px; font-size: 13.5px; }
@@ -850,7 +852,8 @@ function diffChips(s, b) {
 function resolve(s, idx) {
   const p = s.pending; if (!p) return;
   s.newLog = [];
-  const o = p.opts[idx];
+  let o = p.opts[idx];
+  if (o.disabled) { idx = p.opts.findIndex(x => !x.disabled); o = p.opts[idx]; }
   s.pending = null;
   log(s, `▸ ${o.t}`, 'pick');
   const before = snapState(s), n0 = s.newLog.length;
@@ -864,12 +867,24 @@ function resolve(s, idx) {
 }
 function autoPick(s) {
   const p = s.pending; if (!p) return 0;
-  const w = p.opts.map(o => typeof o.aw === 'function' ? o.aw(s) : (o.aw == null ? 1 : o.aw));
-  return pick(w.map((x, i) => [i, Math.max(0.0001, x)]));
+  const w = p.opts.map(o => o.disabled ? 0 : (typeof o.aw === 'function' ? o.aw(s) : (o.aw == null ? 1 : o.aw)));
+  const c = w.map((x, i) => [i, x]).filter(e => e[1] > 0);
+  return c.length ? pick(c) : p.opts.findIndex(o => !o.disabled);
 }
 function ask(s, q, opts, extra) {
   const e = log(s, q, 'choice');
   s.pending = Object.assign({ q: fill(q, s), opts: opts.map(o => Object.assign({}, o, { t: fill(o.t, s) })), entry: e }, extra || {});
+  // 돈이 드는 선택지: 모자라면 빚을 져야 한다고 알리고, 빌릴 수도 없으면 고를 수 없다
+  if (s.ledger) for (const o of s.pending.opts) {
+    let c = typeof o.cost === 'function' ? o.cost(s) : o.cost;
+    if (c == null) { const m = o.t.match(/\(([^)]*?)([\d,.]+)(억|만) 원[^)]*\)/); if (m && !/해마다|씩|줄어듦/.test(m[0])) c = parseFloat(m[2].replace(/,/g, '')) * (m[3] === '억' ? 1e8 : 1e4); }
+    if (!c || c <= 0) continue;
+    const have = (s.cash || 0) + invTotal(s);
+    if (have >= c) continue;
+    if (o.noDebt || s.flags.has('creditBad') || debtRatio(s) > 4) { o.disabled = true; o.why = s.flags.has('creditBad') ? '신용 불량이라 빌릴 수 없어요' : o.noDebt ? '빌려줄 돈이 없어요' : '빚이 너무 많아 더 빌릴 수 없어요'; }
+    else o.t += ' · 모자란 돈은 빚으로';
+  }
+  if (s.pending.opts.every(o => o.disabled)) s.pending.opts.forEach(o => { o.disabled = false; });
   if (s.pending.title) s.pending.title = fill(s.pending.title, s);
   if (s.pending.note) s.pending.note = fill(typeof s.pending.note === 'function' ? s.pending.note(s) : s.pending.note, s);
 }
@@ -1055,6 +1070,8 @@ function syncM(s) { if (!s.ledger) return; const n = netWorth(s); s.st.m = n <= 
 function addCash(s, won) {
   if (!s.ledger) { s.st.m = clamp(s.st.m + won / (1e6 * scOf(s))); return; }
   s.cash += won;
+  // 현금이 모자라면 투자금에서 먼저 꺼내고, 그래도 모자라면 빚이 된다
+  if (s.cash < 0) { for (const k of Object.keys(s.inv || {})) { if (s.cash >= 0) break; const t = Math.min(-s.cash, s.inv[k]); s.inv[k] -= t; s.cash += t; if (s.inv[k] < 1) delete s.inv[k]; } }
   if (s.cash < 0) { s.debt += -s.cash; s.cash = 0; }
   syncM(s);
 }
@@ -1112,7 +1129,7 @@ function yearlyMoney(s) {
   }
   // 빚: 연 4% 이자, 원리금 상환. 갚을 돈이 없으면 형편이 쪼들린다
   if (s.debt > 0) {
-    s.debt *= 1.04;
+    s.debt *= 1.06;
     const pay = Math.min(s.debt, Math.max(s.debt * 0.15, inc * 0.1));
     if (s.cash + Math.max(0, save) >= pay) { s.debt -= pay; save -= pay; }
     else if (s.houseVal > 0 && (s.flags.has('retired') || s.debt > Math.max(inc, 1) * 4)) {
@@ -1192,6 +1209,7 @@ function actionState(s, a, c) {
   if (s.acted && s.acted[a.key] === s.year) return { ok: false, why: '올해 이미 했어요' };
   if (!a.can(s)) return { ok: false, why: '지금은 할 수 없어요' };
   if (a.who && !a.alone && !c) return { ok: false, why: '누구에게 할지 고르세요' };
+  if (a.key !== 'checkup' && (s.flags.has('creditBad') || debtRatio(s) > 3)) return { ok: false, why: '빚 독촉 중이라 쓸 수 없어요' };
   if (s.cash < a.cost(s, c)) return { ok: false, why: '돈이 모자라요' };
   return { ok: true };
 }
@@ -1310,7 +1328,7 @@ const DECISIONS = [
     const part = ch(['허리', '무릎', '위장', '심장', '눈', '치아', '어깨']);
     const cost = Math.round((180 + R() * 900) * 1e4 * scOf(s) / 1e4) * 1e4;
     ask(s, `${jo(part, '이')} 계속 아팠다. 의사는 치료에 ${wonText(cost)}쯤 든다고 했다.`, [
-      { t: '치료받는다', aw: s => s.cash > cost ? 2 : 0.4, r: s => { addCash(s, -cost); fx(s, { h: 7 }); return `치료를 받았다. ${part} 통증이 한결 나아졌다.`; } },
+      { t: '치료받는다', cost, aw: s => s.cash > cost ? 2 : 0.4, r: s => { addCash(s, -cost); fx(s, { h: 7 }); return `치료를 받았다. ${part} 통증이 한결 나아졌다.`; } },
       { t: '참고 지낸다', aw: s => s.cash > cost ? 0.4 : 2, r: s => { fx(s, { h: -6, j: -2 }); return '참고 지내기로 했다. 비 오는 날이면 더 쑤셨다.'; } }]);
   } },
   // 큰 병
@@ -1320,7 +1338,7 @@ const DECISIONS = [
     const cost = Math.round((early ? 900 : 2600) * 1e4 * scOf(s) * (0.8 + R() * 0.5) / 1e4) * 1e4;
     src(s, '스타베리아');
     ask(s, early ? `건강검진에서 ${jo(ill, '을')} 일찍 발견했다. 수술비는 ${wonText(cost)}.` : `${ill} 진단을 받았다. 수술하면 ${wonText(cost)}이 든다고 했다.`, [
-      { t: '수술받는다', aw: 3, r: s => { addCash(s, -cost); if (chance(early ? 0.96 : 0.86)) { fx(s, { h: -8, j: -4 }); s.natAge -= early ? 1 : 3; return '수술은 잘 끝났다. 몇 달 동안 몸을 추슬렀다.'; } die(s, `${ill} 수술 뒤 회복하지 못하고 세상을 떠났다.`, 'violent'); return null; } },
+      { t: '수술받는다', cost, aw: 3, r: s => { addCash(s, -cost); if (chance(early ? 0.96 : 0.86)) { fx(s, { h: -8, j: -4 }); s.natAge -= early ? 1 : 3; return '수술은 잘 끝났다. 몇 달 동안 몸을 추슬렀다.'; } die(s, `${ill} 수술 뒤 회복하지 못하고 세상을 떠났다.`, 'violent'); return null; } },
       { t: '수술하지 않는다', aw: s => s.age > 80 ? 1.5 : 0.3, r: s => { s.natAge = Math.min(s.natAge, s.age + ri(1, 5)); fx(s, { j: -6 }); return '수술 대신 남은 시간을 집에서 보내기로 했다.'; } }], { turn: 1 });
   } },
   // 부모 돌봄
@@ -1328,10 +1346,10 @@ const DECISIONS = [
     const p = s.parents.filter(p => p.alive).sort((a, b) => b.at - a.at)[0];
     const fee = 1800e4 * scOf(s);
     const opts = [
-      { t: '모시고 산다', aw: 1.2, r: s => { p.withMe = true; fx(s, { r: 6, j: -3, h: -2 }); addCash(s, -400e4 * scOf(s)); return `${p.rel === '아버지' ? '아버지' : '어머니'}를 집으로 모셨다. 집이 좁아졌지만 저녁 식탁이 시끌벅적해졌다.`; } },
+      { t: '모시고 산다', cost: 400e4 * scOf(s), aw: 1.2, r: s => { p.withMe = true; fx(s, { r: 6, j: -3, h: -2 }); addCash(s, -400e4 * scOf(s)); return `${p.rel === '아버지' ? '아버지' : '어머니'}를 집으로 모셨다. 집이 좁아졌지만 저녁 식탁이 시끌벅적해졌다.`; } },
       { t: `요양시설에 모신다 (${wonText(fee)})`, aw: s => s.cash > fee ? 1.2 : 0.2, r: s => { addCash(s, -fee); fx(s, { r: -2 }); return '요양시설에 모셨다. 주말마다 찾아갔다.'; } },
     ];
-    if (s.siblings.length) opts.push({ t: '형제와 나눠 맡는다', aw: 1, r: s => { addCash(s, -600e4 * scOf(s)); fx(s, { r: 2 }); return `${jo(s.siblings[0].name, '과')} 번갈아 돌보기로 했다. 가끔은 그 일로 다퉜다.`; } });
+    if (s.siblings.length) opts.push({ t: '형제와 나눠 맡는다', cost: 600e4 * scOf(s), aw: 1, r: s => { addCash(s, -600e4 * scOf(s)); fx(s, { r: 2 }); return `${jo(s.siblings[0].name, '과')} 번갈아 돌보기로 했다. 가끔은 그 일로 다퉜다.`; } });
     ask(s, `${p.rel === '아버지' ? '아버지' : '어머니'}가 혼자 지내기 어려워졌다. ${p.at + s.age}세였다.`, opts, { turn: 1 });
   } },
   // 자녀 학비
@@ -1339,7 +1357,7 @@ const DECISIONS = [
     const k = s.kids.find(k => s.year - k.y === 19 && !k.tuition); k.tuition = true;
     const fee = 2400e4 * scOf(s);
     ask(s, `${jo(k.name, '이')} 대학에 붙었다. 학비는 4년에 ${wonText(fee)}쯤 들 것 같았다.`, [
-      { t: '학비를 대 준다', aw: s => s.cash > fee ? 2 : 0.6, r: s => { addCash(s, -fee); fx(s, { r: 4 }); addBond(s, k.name, 12); k.uni = true; k.paid = true; later(s, 4, s => log(s, `${jo(k.name, '이')} 대학을 졸업했다. 졸업식 날 꽃다발을 내밀었다.`, 'event')); return `${k.name}의 학비를 대 주기로 했다.`; } },
+      { t: '학비를 대 준다', cost: fee, aw: s => s.cash > fee ? 2 : 0.6, r: s => { addCash(s, -fee); fx(s, { r: 4 }); addBond(s, k.name, 12); k.uni = true; k.paid = true; later(s, 4, s => log(s, `${jo(k.name, '이')} 대학을 졸업했다. 졸업식 날 꽃다발을 내밀었다.`, 'event')); return `${k.name}의 학비를 대 주기로 했다.`; } },
       { t: '스스로 하게 둔다', aw: 1, r: s => { fx(s, { r: -2 }); addBond(s, k.name, -8); k.uni = true; return `${jo(k.name, '은')} 학자금 대출을 받았다. 고맙다는 말도 서운하다는 말도 없었다.`; } }]);
   } },
   // 자녀의 삶
@@ -1923,6 +1941,7 @@ function runRandom(s) {
   const base = EVENTS.filter(e => !DEC_IDS.has(e.id) && !FLAVOR_IDS.has(e.id));
   if (isAway(s)) { awayEvents(s); return; } // 자리를 비운 동안에는 바깥일이 일어나지 않는다
   if (devilPriority(s) && (s.pending || !s.alive)) return;
+  if (debtPriority(s) && (s.pending || !s.alive)) return;
   if (extraRandom(s) || s.pending || !s.alive) return;
   if (s.eage >= 20 && chance(0.32)) { const d = pickFrom(s, DECISIONS); if (d) { fire(s, d); if (s.pending || !s.alive) return; } }
   if (chance(s.eage < 13 ? 0.45 : s.eage < 65 ? 0.55 : 0.5)) { const e = pickFrom(s, base); if (e) { fire(s, e); if (s.pending || !s.alive) return; } }
@@ -1986,7 +2005,7 @@ const FLAVOR = [
   { id: 'f_hansil', a: [5, 10], w: 0.6, c: ['ssc'], t: '한실그리기 장난감으로 허공에 3D 펜 그림을 그렸다. 선이 끊기면 처음부터 다시였다.', fx: { e: 1, j: 2 }, src: '한실그리기' },
   { id: 'f_neuromaster', a: [6, 14], w: 0.6, c: ['ssc'], when: s => s.wealth >= 3, t: '콰이퍼 뉴로마스터를 머리에 쓰고 뇌파 훈련 놀이를 했다. 점수가 매일 기록되었다.', fx: { e: 2 }, src: '콰이퍼 뉴로마스터' },
   { id: 'f_scm', a: [22, 60], w: 0.4, c: ['ssc', 'starland'], when: s => s.ledger, q: '스튜디오 컬렉션 마스터피스 신작 피규어가 나왔다. 가격이 정신 나간 수준이었다.', opts: [
-    { t: '산다', aw: s => s.cash > 300e4 * scOf(s) ? 1 : 0.2, r: s => { addCash(s, -150e4 * scOf(s)); fx(s, { j: 6 }); return `질렀다. ${wonText(150e4 * scOf(s))}이었다. 진열장 한가운데에 세워 두었다.`; } },
+    { t: '산다', cost: s => 150e4 * scOf(s), aw: s => s.cash > 300e4 * scOf(s) ? 1 : 0.2, r: s => { addCash(s, -150e4 * scOf(s)); fx(s, { j: 6 }); return `질렀다. ${wonText(150e4 * scOf(s))}이었다. 진열장 한가운데에 세워 두었다.`; } },
     { t: '참는다', aw: 1.3, r: s => '참았다. 대신 사진을 몇 번이고 들여다봤다.' }], src: '스튜디오 컬렉션 마스터피스 시리즈' },
   { id: 'f_mac42', a: [16, 60], w: 0.3, c: ['ssc'], when: s => s.year >= 2018, t: '분자요리 42호 맥-거핀을 먹어 봤다. 일곱 번째 맛이라는데 뭐라고 설명할 수가 없었다.', src: '분자요리 42호 맥-거핀' },
 
@@ -1996,7 +2015,7 @@ const FLAVOR = [
   { id: 'f_goldbaguette', a: [10, 80], w: 0.4, c: ['pluper'], when: s => s.wealth >= 3 || s.status === '귀족·영주가', t: '금밀로 구운 골드바게트를 아침으로 먹었다. 맛보다 빛깔이 먼저 눈에 들어왔다.', src: '골드바게트' },
   { id: 'f_outsider_toy', a: [6, 11], w: 0.6, c: ['pluper'], when: s => s.status === '중앙도시 내지인' || s.status === '귀족·영주가', t: '친구 집에서 \'바깥것 잡기\' 장난감을 갖고 놀았다. 성 밖 사람들을 잡는 놀이라는 걸 그때는 이상하게 여기지 않았다.', src: '바깥것잡기' },
   { id: 'f_legourmet', a: [25, 80], w: 0.35, c: ['pluper'], when: s => s.ledger && s.cash > 500e4 * scOf(s), q: '하루 한 자릿수 손님만 받는 르 구르메에 예약이 났다.', opts: [
-    { t: '가 본다', aw: 1, r: s => { addCash(s, -120e4 * scOf(s)); fx(s, { j: 6, r: 3 }); return `코스 요리 한 접시마다 설명이 길었다. 계산서에는 ${wonText(120e4 * scOf(s))}이 찍혀 있었다.`; } },
+    { t: '가 본다', cost: s => 120e4 * scOf(s), aw: 1, r: s => { addCash(s, -120e4 * scOf(s)); fx(s, { j: 6, r: 3 }); return `코스 요리 한 접시마다 설명이 길었다. 계산서에는 ${wonText(120e4 * scOf(s))}이 찍혀 있었다.`; } },
     { t: '양보한다', aw: 1, r: s => '다른 사람에게 자리를 양보했다.' }], src: '르 구르메' },
   { id: 'f_sparkle', a: [14, 70], w: 0.4, c: ['pluper'], t: 'Sparkle Jewels 박람회에서 보석 세공 경연을 구경했다. 우승작 앞에는 사람들이 겹겹이 서 있었다.', fx: { j: 3 }, src: 'Sparkle Jewels' },
 
@@ -2720,9 +2739,26 @@ function debtRatio(s) { if (!s.ledger || !s.debt) return 0; return s.debt / Math
 function debtTick(s) {
   const r = debtRatio(s);
   if (r <= 0) { if (s.flags.has('creditBad') && s.creditUntil && s.year >= s.creditUntil) { s.flags.delete('creditBad'); log(s, '신용이 회복되었다. 다시 대출을 받을 수 있게 되었다.', 'event'); } return; }
-  if (r > 1.5) { fx(s, { j: -2, h: -1 }); if (s.partner && s.flags.has('married')) addBond(s, s.partner, -2); }
-  if (r > 3) { fx(s, { j: -3, h: -2, r: -1 }); }
-  if (r > 5 && !s.flags.has('creditBad')) { s.flags.add('creditBad'); s.creditUntil = s.year + 5; log(s, '빚이 감당할 수 없을 만큼 불어났다. 신용 등급이 바닥으로 떨어져 더는 대출을 받을 수 없었다.', 'event', { turn: 1 }); }
+  const neg = { neg: true };
+  if (r > 1.5) {
+    fx(s, { j: -3, h: -1.5 }); if (s.partner && s.flags.has('married')) addBond(s, s.partner, -3);
+    if (chance(0.6)) log(s, ch(['빚 독촉 문자가 하루에도 몇 통씩 왔다.', '이자가 월급날마다 먼저 빠져나갔다. 남는 게 없었다.', '은행에서 연체 안내 전화가 왔다.']), 'event', neg);
+  }
+  if (r > 3) {
+    fx(s, { j: -4, h: -3, r: -2 });
+    // 압류: 통장에 돈이 들어오는 족족 빠져나간다
+    if (s.cash > 0) { const take = Math.min(s.debt, s.cash * 0.6); s.cash -= take; s.debt -= take; syncM(s); log(s, `빚쟁이들이 통장을 압류했다. ${wonText(take)}이 빠져나갔다.`, 'event', neg); }
+    if (invTotal(s) > 0 && chance(0.5)) { const v = invTotal(s), take = Math.min(s.debt, v); pullInv(s, take + (s.cash || 0)); s.cash -= take; s.debt -= take; syncM(s); log(s, `투자해 둔 돈 ${wonText(take)}도 압류되었다.`, 'event', neg); }
+  }
+  if (r > 5 && !s.flags.has('creditBad')) { s.flags.add('creditBad'); s.creditUntil = s.year + 5; log(s, '빚이 감당할 수 없을 만큼 불어났다. 신용 등급이 바닥으로 떨어져 더는 대출을 받을 수 없었다.', 'event', { turn: 1, neg: true }); }
+  // 돈이 바닥나면 끼니부터 흔들린다
+  if ((s.cash || 0) < 50e4 * scOf(s) && r > 1.5) { fx(s, { h: -2, j: -2 }); if (chance(0.5)) log(s, ch(['끼니를 거르는 날이 늘었다.', '전기 요금을 내지 못해 며칠 동안 촛불을 켜고 지냈다.', '아이 학원을 끊었다.', '병원에 가야 했지만 참았다.']), 'event', neg); }
+}
+// 빚이 아주 많으면 독촉이 다른 일보다 먼저 찾아온다
+function debtPriority(s) {
+  if (debtRatio(s) <= 3 || !chance(0.55)) return false;
+  const e = EVENTS.find(x => x.id === 'debt_call'); if (!e) return false;
+  fire(s, e); return true;
 }
 const debtLabel = s => { const r = debtRatio(s); return r <= 0 ? null : r < 1 ? '빚 부담 적음' : r < 3 ? '빚 부담 큼' : r < 5 ? '빚 부담 아주 큼' : '갚기 어려움'; };
 
@@ -2812,7 +2848,7 @@ const agencyEvents = [
   { id: 'lend', a: [25, 80], w: s => s.ledger && s.cash > 500e4 * scOf(s) ? 0.6 : 0, run: s => {
     const f = s.friends.find(f => !f.gone); const who = f ? f.name : '오래 알던 사람'; const amt = Math.round(s.cash * 0.2 / 1e4) * 1e4;
     ask(s, `${jo(who, '이')} 급하다며 ${wonText(amt)}을 빌려 달라고 했다.`, [
-      { t: '빌려준다', aw: 1, r: s => { addCash(s, -amt); if (chance(0.45)) { later(s, 1, s => { addCash(s, amt); addBond(s, who, 10); log(s, `${jo(who, '이')} 빌려 간 돈을 갚았다. 작은 선물도 함께였다.`, 'event'); }); addBond(s, who, 8); return '빌려주었다. 꼭 갚겠다고 했다.'; } later(s, 1, s => { addBond(s, who, -30); fx(s, { j: -6 }); log(s, `${jo(who, '은')} 끝내 돈을 갚지 않았다. 연락도 뜸해졌다.`, 'event'); }); addBond(s, who, 8); return '빌려주었다. 꼭 갚겠다고 했다.'; } },
+      { t: '빌려준다', cost: amt, noDebt: true, aw: 1, r: s => { addCash(s, -amt); if (chance(0.45)) { later(s, 1, s => { addCash(s, amt); addBond(s, who, 10); log(s, `${jo(who, '이')} 빌려 간 돈을 갚았다. 작은 선물도 함께였다.`, 'event'); }); addBond(s, who, 8); return '빌려주었다. 꼭 갚겠다고 했다.'; } later(s, 1, s => { addBond(s, who, -30); fx(s, { j: -6 }); log(s, `${jo(who, '은')} 끝내 돈을 갚지 않았다. 연락도 뜸해졌다.`, 'event'); }); addBond(s, who, 8); return '빌려주었다. 꼭 갚겠다고 했다.'; } },
       { t: '거절한다', aw: 1, r: s => { addBond(s, who, -12); return `거절했다. ${jo(who, '은')} 서운한 얼굴로 돌아갔다.`; } }], { title: '돈을 빌려 달라는 부탁' });
   } },
 ];
@@ -3088,25 +3124,25 @@ function fixJosa(t) {
     $('choiceT').textContent = title;
     $('choiceQ').textContent = body;
     const note = $('choiceNote'); note.hidden = !p.note; note.textContent = p.note || '';
-    $('choiceOpts').innerHTML = p.opts.map((o, i) => `<button type="button" data-i="${i}"><span class="n">${i + 1}</span><span>${esc(o.t)}</span></button>`).join('');
+    $('choiceOpts').innerHTML = p.opts.map((o, i) => `<button type="button" data-i="${i}"${o.disabled ? ' disabled' : ''}><span class="n">${i + 1}</span><span>${esc(o.t)}${o.disabled ? `<small class="why">${esc(o.why || '')}</small>` : ''}</span></button>`).join('');
     $('choicePill').hidden = true;
     const box = $('choice'); box.hidden = false; box.style.display = '';
     const card = box.querySelector('.cm-card'); card.style.animation = 'none'; void card.offsetWidth; card.style.animation = '';
     box.scrollTop = 0;
     if (auto) setTimeout(() => { if (S && S.pending === p) choose(autoPick(S)); }, Math.min(2500, Math.max(400, delay() / 4)));
-    else { const b = $('choiceOpts').querySelector('button'); if (b) b.focus({ preventScroll: true }); }
+    else { const b = $('choiceOpts').querySelector('button:not([disabled])'); if (b) b.focus({ preventScroll: true }); }
   }
-  $('choiceOpts').addEventListener('click', e => { const b = e.target.closest('button'); if (!b || !S || !S.pending) return; choose(+b.dataset.i); });
+  $('choiceOpts').addEventListener('click', e => { const b = e.target.closest('button'); if (!b || b.disabled || !S || !S.pending) return; choose(+b.dataset.i); });
   function hideChoice() { const box = $('choice'); box.hidden = true; box.style.display = 'none'; $('choiceOpts').innerHTML = ''; $('choicePill').hidden = true; }
   // 잠깐 내려 두기: 팝업을 접고 화면 아래 버튼으로 남긴다
   $('choiceMin').addEventListener('click', () => { if (!S || !S.pending) return; $('choice').hidden = true; $('choicePill').hidden = false; $('choicePill').focus({ preventScroll: true }); });
-  $('choicePill').addEventListener('click', () => { if (!S || !S.pending) return; $('choicePill').hidden = true; $('choice').hidden = false; const b = $('choiceOpts').querySelector('button'); if (b) b.focus({ preventScroll: true }); });
+  $('choicePill').addEventListener('click', () => { if (!S || !S.pending) return; $('choicePill').hidden = true; $('choice').hidden = false; const b = $('choiceOpts').querySelector('button:not([disabled])'); if (b) b.focus({ preventScroll: true }); });
   $('choiceAuto').addEventListener('click', () => { if (!S || !S.pending) return; auto = true; store('bj_auto', '1'); markAuto(); choose(autoPick(S)); });
   $('choice').addEventListener('click', e => { if (e.target === $('choice')) $('choiceMin').click(); });
   document.addEventListener('keydown', e => {
     if (!S || !S.pending || $('choice').hidden) return;
     if (e.key === 'Escape') { $('choiceMin').click(); return; }
-    const n = +e.key; if (n >= 1 && n <= S.pending.opts.length && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); choose(n - 1); }
+    const n = +e.key; if (n >= 1 && n <= S.pending.opts.length && !S.pending.opts[n - 1].disabled && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); choose(n - 1); }
   });
   function choose(i) {
     if (!S.pending) return;
